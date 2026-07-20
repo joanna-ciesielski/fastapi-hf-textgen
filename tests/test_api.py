@@ -97,11 +97,13 @@ def test_generate_uses_documented_defaults(client):
     [
         {},  # missing prompt
         {"prompt": ""},  # empty prompt
+        {"prompt": "   \n\t "},  # whitespace-only prompt
         {"prompt": "x" * 8001},  # prompt too long
         {"prompt": "ok", "max_new_tokens": 0},  # below minimum
         {"prompt": "ok", "max_new_tokens": 10_000},  # above maximum
         {"prompt": "ok", "temperature": -0.1},  # invalid temperature
         {"prompt": "ok", "temperature": 5},  # invalid temperature
+        {"prompt": "ok", "max_tokens": 5},  # unknown field (typo) rejected
     ],
 )
 def test_generate_rejects_invalid_input_with_422(client, payload):
@@ -117,3 +119,32 @@ def test_generation_failure_returns_clean_500_json(client):
     body = resp.json()
     assert body["error"] == "generation_failed"
     assert "boom" in body["detail"]
+
+
+def test_ready_returns_503_until_model_loads(client):
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "model_not_loaded"
+
+
+def test_ready_returns_200_once_loaded(client):
+    app.state.generator = StubGenerator()
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ready"
+
+
+def test_concurrent_requests_all_succeed(client):
+    """Semaphore queues requests rather than dropping them."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    app.state.generator = StubGenerator(reply="ok")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda i: client.post("/generate", json={"prompt": f"req {i}"}),
+                range(8),
+            )
+        )
+    assert all(r.status_code == 200 for r in results)
+    assert len(app.state.generator.calls) == 8

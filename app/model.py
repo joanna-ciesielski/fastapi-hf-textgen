@@ -63,10 +63,14 @@ class TextGenerator:
         model_input = [{"role": "user", "content": prompt}] if use_chat else prompt
         # An explicit GenerationConfig avoids the deprecated loose-kwargs path
         # (removed in future transformers releases).
+        max_time_s = float(os.environ.get("GENERATION_MAX_TIME_S", "120"))
         generation_config = GenerationConfig(
             max_new_tokens=max_new_tokens,
             do_sample=not greedy,
             temperature=None if greedy else temperature,
+            # Graceful wall-clock cap: generation stops (mid-output) rather
+            # than running unbounded on slow CPUs. 0 disables the cap.
+            max_time=max_time_s if max_time_s > 0 else None,
             pad_token_id=getattr(tokenizer, "pad_token_id", None)
             or getattr(tokenizer, "eos_token_id", None),
         )

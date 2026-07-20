@@ -43,19 +43,21 @@ Response:
 }
 ```
 
-Health check:
+Health and readiness:
 
 ```bash
-curl -s http://localhost:8000/health
-# {"status":"ok","model":"Qwen/Qwen2.5-0.5B-Instruct","model_loaded":true}
+curl -s http://localhost:8000/health   # liveness: 200 as soon as the process is up
+curl -s http://localhost:8000/ready    # readiness: 200 only once the model is loaded (503 before)
 ```
 
 ## Configuration
 
-| Variable          | Default                       | Purpose                                   |
-| ----------------- | ----------------------------- | ----------------------------------------- |
-| `MODEL_ID`        | `Qwen/Qwen2.5-0.5B-Instruct`  | Any HF causal-LM / chat model             |
-| `SKIP_MODEL_LOAD` | unset                         | `1` = start API without loading the model |
+| Variable                     | Default                      | Purpose                                            |
+| ---------------------------- | ---------------------------- | -------------------------------------------------- |
+| `MODEL_ID`                   | `Qwen/Qwen2.5-0.5B-Instruct` | Any HF causal-LM / chat model                      |
+| `MAX_CONCURRENT_GENERATIONS` | `1`                          | Generations running at once; extras queue cheaply  |
+| `GENERATION_MAX_TIME_S`      | `120`                        | Wall-clock cap per generation (`0` = off)          |
+| `SKIP_MODEL_LOAD`            | unset                        | `1` = start API without loading the model          |
 
 Request parameters (validated, with clear 422 errors):
 
@@ -73,9 +75,17 @@ All errors come back as JSON, never stack traces:
 - `503` — model still loading (`{"error": "model_not_loaded", ...}`)
 - `500` — inference failure (`{"error": "generation_failed", ...}`)
 
-Inference runs in a worker thread, so the event loop (health checks, docs)
-stays responsive during generation, and pipeline access is serialized for
-thread safety.
+Unknown request fields are rejected (422) so typos like `max_tokens` fail
+loudly instead of being silently ignored.
+
+## Concurrency model
+
+Inference is CPU-bound, so it runs in a worker thread — the event loop
+(health checks, docs, queued requests) stays responsive during generation.
+An async semaphore (`MAX_CONCURRENT_GENERATIONS`, default 1) bounds how many
+generations occupy threads at once; excess requests wait on the event loop
+without consuming threads, then run in arrival order. Each generation is also
+wall-clock capped (`GENERATION_MAX_TIME_S`) so a slow CPU can't run unbounded.
 
 ## Tests
 
@@ -89,11 +99,14 @@ python -m pytest -v
 
 ## Docker
 
+Runs as a non-root user, includes a container HEALTHCHECK, and keeps model
+weights in a mountable cache so they survive restarts:
+
 ```bash
 docker build -t hf-textgen .
-docker run -p 8000:8000 hf-textgen
+docker run -p 8000:8000 -v hf-cache:/srv/.cache hf-textgen
 # or with a different model:
-docker run -p 8000:8000 -e MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct hf-textgen
+docker run -p 8000:8000 -v hf-cache:/srv/.cache -e MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct hf-textgen
 ```
 
 ## Beyond the POC

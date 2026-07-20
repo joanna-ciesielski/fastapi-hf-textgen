@@ -1,10 +1,16 @@
 """Request/response schemas for the text-generation API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class GenerateRequest(BaseModel):
-    """A single text-generation request."""
+    """A single text-generation request.
+
+    Unknown fields are rejected (422) so client typos like ``max_tokens``
+    fail loudly instead of being silently ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(
         ...,
@@ -25,6 +31,13 @@ class GenerateRequest(BaseModel):
         le=2.0,
         description="Sampling temperature. 0 = deterministic (greedy).",
     )
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("prompt must not be empty or whitespace-only")
+        return value
 
 
 class GenerateResponse(BaseModel):
