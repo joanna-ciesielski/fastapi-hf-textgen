@@ -3,10 +3,11 @@ FROM python:3.11-slim
 
 WORKDIR /srv
 
-# CPU-only torch keeps the image several GB smaller than the default wheel.
+# Install torch from the CPU-only index FIRST (its own step): with a plain
+# --extra-index-url, pip can still resolve the multi-GB CUDA wheel from PyPI.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-    -r requirements.txt
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 

@@ -53,19 +53,28 @@ class TextGenerator:
         if self._pipeline is None:
             raise GenerationError("Model is not loaded.")
 
+        from transformers import GenerationConfig  # lazy import, see module docstring
+
         greedy = temperature == 0.0
         # Chat-tuned models produce much better results via their chat template;
         # base models without one get the raw prompt instead.
         tokenizer = getattr(self._pipeline, "tokenizer", None)
         use_chat = bool(getattr(tokenizer, "chat_template", None))
         model_input = [{"role": "user", "content": prompt}] if use_chat else prompt
+        # An explicit GenerationConfig avoids the deprecated loose-kwargs path
+        # (removed in future transformers releases).
+        generation_config = GenerationConfig(
+            max_new_tokens=max_new_tokens,
+            do_sample=not greedy,
+            temperature=None if greedy else temperature,
+            pad_token_id=getattr(tokenizer, "pad_token_id", None)
+            or getattr(tokenizer, "eos_token_id", None),
+        )
         try:
             with self._lock:
                 outputs = self._pipeline(
                     model_input,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=not greedy,
-                    temperature=None if greedy else temperature,
+                    generation_config=generation_config,
                     return_full_text=False,
                 )
             text = outputs[0]["generated_text"]

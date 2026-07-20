@@ -9,9 +9,12 @@ single environment variable.
 
 ## Quickstart
 
+Requires Python 3.10+.
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+pip install torch --index-url https://download.pytorch.org/whl/cpu  # CPU wheel, much smaller
+pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
