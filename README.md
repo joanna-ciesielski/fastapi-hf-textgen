@@ -88,8 +88,14 @@ Inference is CPU-bound, so it runs in a worker thread — the event loop
 (health checks, docs, queued requests) stays responsive during generation.
 An async semaphore (`MAX_CONCURRENT_GENERATIONS`, default 1) bounds how many
 generations occupy threads at once; excess requests wait on the event loop
-without consuming threads, then run in arrival order. Each generation is also
-wall-clock capped (`GENERATION_MAX_TIME_S`) so a slow CPU can't run unbounded.
+without consuming threads, then run in arrival order — bounded by a queue
+timeout that returns `503 server_busy` (the acquire is written to be
+cancellation-safe, so a timed-out request can never leak a capacity permit).
+Each generation is also wall-clock capped (`GENERATION_MAX_TIME_S`) so a slow
+CPU can't run unbounded.
+
+State (semaphore, loaded model) is per-process by design: run one process per
+container and scale horizontally behind a load balancer using `/ready`.
 
 ## Tests
 

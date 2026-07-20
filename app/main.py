@@ -62,9 +62,35 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HF Text Generation API",
     description="Small proof-of-concept: a Hugging Face LLM behind a FastAPI endpoint.",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
+
+
+async def _acquire_with_timeout(semaphore: asyncio.Semaphore, timeout_s: float) -> bool:
+    """Acquire ``semaphore`` within ``timeout_s`` seconds; return False on timeout.
+
+    Deliberately not ``asyncio.wait_for(semaphore.acquire(), ...)``: on
+    cancellation there is a narrow race (pre-3.12 especially) where the permit
+    is acquired just as the timeout cancels the task, leaking the permit and
+    permanently shrinking capacity. Here the acquired-anyway case is detected
+    and the permit released.
+    """
+    if timeout_s <= 0:  # 0 (or negative) = wait indefinitely
+        await semaphore.acquire()
+        return True
+    acquire_task = asyncio.create_task(semaphore.acquire())
+    done, _pending = await asyncio.wait({acquire_task}, timeout=timeout_s)
+    if acquire_task in done:
+        return True
+    acquire_task.cancel()
+    try:
+        await acquire_task
+    except asyncio.CancelledError:
+        return False
+    # The task completed between the timeout and the cancel: give the permit back.
+    semaphore.release()
+    return False
 
 
 def _not_loaded_response() -> JSONResponse:
@@ -149,12 +175,7 @@ async def generate(
     # Retry-After instead of piling up indefinitely.
     semaphore: asyncio.Semaphore = request.app.state.generation_semaphore
     queue_timeout_s = env_float("GENERATION_QUEUE_TIMEOUT_S", 30.0)
-    try:
-        if queue_timeout_s > 0:
-            await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout_s)
-        else:  # 0 = wait indefinitely
-            await semaphore.acquire()
-    except asyncio.TimeoutError:
+    if not await _acquire_with_timeout(semaphore, queue_timeout_s):
         return JSONResponse(
             status_code=503,
             headers={"Retry-After": "5"},

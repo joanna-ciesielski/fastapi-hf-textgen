@@ -184,6 +184,32 @@ def test_invalid_env_values_fall_back_to_defaults(client, monkeypatch):
     assert resp.json()["generated_text"] == "still fine"
 
 
+def test_acquire_helper_success_timeout_and_no_permit_leak():
+    """Unit-test the timeout-safe semaphore acquire used for backpressure."""
+    import asyncio
+
+    from app.main import _acquire_with_timeout
+
+    async def scenario():
+        sem = asyncio.Semaphore(1)
+        # Free semaphore: acquires immediately.
+        assert await _acquire_with_timeout(sem, 0.5) is True
+        # Held semaphore: times out and reports busy.
+        assert await _acquire_with_timeout(sem, 0.05) is False
+        # After a timeout, capacity is intact (no leaked permit): release once
+        # and the next acquire must succeed.
+        sem.release()
+        assert await _acquire_with_timeout(sem, 0.05) is True
+        sem.release()
+        # timeout<=0 waits indefinitely: verify it completes once freed.
+        await _acquire_with_timeout(sem, 0)
+        release_soon = asyncio.get_event_loop().call_later(0.05, sem.release)
+        assert await _acquire_with_timeout(sem, 0) is True
+        release_soon.cancel()
+
+    asyncio.run(scenario())
+
+
 def test_unexpected_exception_returns_consistent_json_without_internals():
     """Non-GenerationError failures get the same clean error shape."""
     with TestClient(app, raise_server_exceptions=False) as test_client:
