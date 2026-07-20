@@ -148,3 +148,55 @@ def test_concurrent_requests_all_succeed(client):
         )
     assert all(r.status_code == 200 for r in results)
     assert len(app.state.generator.calls) == 8
+
+
+def test_saturated_queue_returns_503_server_busy(client, monkeypatch):
+    """With capacity 1 held by a slow request, a short queue timeout yields 503."""
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("GENERATION_QUEUE_TIMEOUT_S", "0.2")
+    slow = StubGenerator(reply="slow done")
+    slow.generate = lambda prompt, max_new_tokens, temperature: (
+        _time.sleep(1.0) or "slow done"
+    )
+    app.state.generator = slow
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(client.post, "/generate", json={"prompt": f"req {i}"})
+            for i in range(2)
+        ]
+        codes = sorted(f.result().status_code for f in futures)
+
+    assert codes == [200, 503]
+    busy = next(f.result() for f in futures if f.result().status_code == 503)
+    assert busy.json()["error"] == "server_busy"
+    assert busy.headers.get("retry-after") == "5"
+
+
+def test_invalid_env_values_fall_back_to_defaults(client, monkeypatch):
+    """Garbage config must degrade gracefully, never crash a request."""
+    monkeypatch.setenv("GENERATION_QUEUE_TIMEOUT_S", "not-a-number")
+    app.state.generator = StubGenerator(reply="still fine")
+    resp = client.post("/generate", json={"prompt": "hello"})
+    assert resp.status_code == 200
+    assert resp.json()["generated_text"] == "still fine"
+
+
+def test_unexpected_exception_returns_consistent_json_without_internals():
+    """Non-GenerationError failures get the same clean error shape."""
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        stub = StubGenerator()
+
+        def explode(prompt, max_new_tokens, temperature):
+            raise RuntimeError("secret internal detail")
+
+        stub.generate = explode
+        app.state.generator = stub
+        resp = test_client.post("/generate", json={"prompt": "boom"})
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["error"] == "internal_error"
+    assert "secret" not in (body.get("detail") or "")

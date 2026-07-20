@@ -61,9 +61,11 @@ class TextGenerator:
         tokenizer = getattr(self._pipeline, "tokenizer", None)
         use_chat = bool(getattr(tokenizer, "chat_template", None))
         model_input = [{"role": "user", "content": prompt}] if use_chat else prompt
+        from app.config import env_float
+
         # An explicit GenerationConfig avoids the deprecated loose-kwargs path
         # (removed in future transformers releases).
-        max_time_s = float(os.environ.get("GENERATION_MAX_TIME_S", "120"))
+        max_time_s = env_float("GENERATION_MAX_TIME_S", 120.0)
         generation_config = GenerationConfig(
             max_new_tokens=max_new_tokens,
             do_sample=not greedy,

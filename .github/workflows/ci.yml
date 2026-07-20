@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The test suite stubs the model, so the heavy ML dependencies
+      # (torch/transformers) are not needed — CI stays fast.
+      - name: Install API + test dependencies
+        run: pip install fastapi "uvicorn[standard]" pydantic pytest httpx
+      - name: Run tests
+        run: python -m pytest -v

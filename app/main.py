@@ -11,6 +11,9 @@ Environment variables:
                                 without holding threads (default: 1).
     GENERATION_MAX_TIME_S       Wall-clock cap per generation, 0 = off
                                 (default: 120).
+    GENERATION_QUEUE_TIMEOUT_S  Max seconds a request may wait for capacity
+                                before receiving 503 server_busy; 0 = wait
+                                indefinitely (default: 30).
     SKIP_MODEL_LOAD             Set to "1" to start the API without loading the
                                 model (used by tests; /generate returns 503).
 """
@@ -27,6 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from app.config import env_float, env_int
 from app.model import GenerationError, TextGenerator
 from app.schemas import (
     ErrorResponse,
@@ -47,7 +51,7 @@ async def lifespan(app: FastAPI):
     # Without this, N concurrent requests would each hold a thread-pool slot
     # while waiting on the model lock, starving the shared pool. With it,
     # excess requests await the semaphore on the event loop instead.
-    max_concurrent = int(os.environ.get("MAX_CONCURRENT_GENERATIONS", "1"))
+    max_concurrent = env_int("MAX_CONCURRENT_GENERATIONS", 1)
     app.state.generation_semaphore = asyncio.Semaphore(max(1, max_concurrent))
     if os.environ.get("SKIP_MODEL_LOAD") != "1":
         # Load in a worker thread so startup can't block the event loop.
@@ -58,7 +62,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HF Text Generation API",
     description="Small proof-of-concept: a Hugging Face LLM behind a FastAPI endpoint.",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -78,6 +82,19 @@ async def generation_error_handler(request: Request, exc: GenerationError):
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(error="generation_failed", detail=str(exc)).model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception):
+    """Consistent JSON error shape for anything unforeseen — no leaked internals."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            error="internal_error",
+            detail="An unexpected error occurred.",
+        ).model_dump(),
     )
 
 
@@ -111,7 +128,10 @@ async def ready(request: Request) -> HealthResponse | JSONResponse:
     responses={
         422: {"description": "Validation error (bad prompt/parameters)."},
         500: {"model": ErrorResponse, "description": "Model inference failed."},
-        503: {"model": ErrorResponse, "description": "Model not loaded yet."},
+        503: {
+            "model": ErrorResponse,
+            "description": "Model not loaded yet, or server at capacity (server_busy).",
+        },
     },
 )
 async def generate(
@@ -122,16 +142,36 @@ async def generate(
         return _not_loaded_response()
 
     start = time.perf_counter()
-    # Semaphore first (cheap, non-blocking wait on the event loop), threadpool
+    # Semaphore first (cheap wait on the event loop, no thread held), threadpool
     # second: CPU-bound inference runs off the loop, and only up to
-    # MAX_CONCURRENT_GENERATIONS requests occupy threads at a time.
-    async with request.app.state.generation_semaphore:
+    # MAX_CONCURRENT_GENERATIONS requests occupy threads at a time. Waiting is
+    # bounded: past the queue timeout the client gets an honest 503 with
+    # Retry-After instead of piling up indefinitely.
+    semaphore: asyncio.Semaphore = request.app.state.generation_semaphore
+    queue_timeout_s = env_float("GENERATION_QUEUE_TIMEOUT_S", 30.0)
+    try:
+        if queue_timeout_s > 0:
+            await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout_s)
+        else:  # 0 = wait indefinitely
+            await semaphore.acquire()
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "5"},
+            content=ErrorResponse(
+                error="server_busy",
+                detail="Generation capacity is saturated. Please retry shortly.",
+            ).model_dump(),
+        )
+    try:
         text = await run_in_threadpool(
             generator.generate,
             payload.prompt,
             payload.max_new_tokens,
             payload.temperature,
         )
+    finally:
+        semaphore.release()
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     logger.info(
         "generated %d chars from %d-char prompt in %d ms",

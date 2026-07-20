@@ -52,12 +52,16 @@ curl -s http://localhost:8000/ready    # readiness: 200 only once the model is l
 
 ## Configuration
 
-| Variable                     | Default                      | Purpose                                            |
-| ---------------------------- | ---------------------------- | -------------------------------------------------- |
-| `MODEL_ID`                   | `Qwen/Qwen2.5-0.5B-Instruct` | Any HF causal-LM / chat model                      |
-| `MAX_CONCURRENT_GENERATIONS` | `1`                          | Generations running at once; extras queue cheaply  |
-| `GENERATION_MAX_TIME_S`      | `120`                        | Wall-clock cap per generation (`0` = off)          |
-| `SKIP_MODEL_LOAD`            | unset                        | `1` = start API without loading the model          |
+| Variable                     | Default                      | Purpose                                              |
+| ---------------------------- | ---------------------------- | ---------------------------------------------------- |
+| `MODEL_ID`                   | `Qwen/Qwen2.5-0.5B-Instruct` | Any HF causal-LM / chat model                        |
+| `MAX_CONCURRENT_GENERATIONS` | `1`                          | Generations running at once; extras queue cheaply    |
+| `GENERATION_MAX_TIME_S`      | `120`                        | Wall-clock cap per generation (`0` = off)            |
+| `GENERATION_QUEUE_TIMEOUT_S` | `30`                         | Max queue wait before `503 server_busy` (`0` = wait) |
+| `SKIP_MODEL_LOAD`            | unset                        | `1` = start API without loading the model            |
+
+Invalid values fall back to defaults with a logged warning — bad config never
+crashes a request.
 
 Request parameters (validated, with clear 422 errors):
 
@@ -71,9 +75,9 @@ Request parameters (validated, with clear 422 errors):
 
 All errors come back as JSON, never stack traces:
 
-- `422` — invalid input (missing/empty prompt, out-of-range parameters)
-- `503` — model still loading (`{"error": "model_not_loaded", ...}`)
-- `500` — inference failure (`{"error": "generation_failed", ...}`)
+- `422` — invalid input (missing/empty prompt, out-of-range parameters, unknown fields)
+- `503` — model still loading (`model_not_loaded`) or at capacity (`server_busy`, with `Retry-After`)
+- `500` — inference failure (`generation_failed`) or anything unforeseen (`internal_error`, no leaked internals)
 
 Unknown request fields are rejected (422) so typos like `max_tokens` fail
 loudly instead of being silently ignored.
@@ -90,7 +94,8 @@ wall-clock capped (`GENERATION_MAX_TIME_S`) so a slow CPU can't run unbounded.
 ## Tests
 
 The test suite runs in seconds and does not download any model — the generator
-is stubbed while the full request/validation/error path is exercised.
+is stubbed while the full request/validation/error/backpressure path is
+exercised. The same suite runs in CI (GitHub Actions) on Python 3.11 and 3.12.
 
 ```bash
 pip install -r requirements-dev.txt
